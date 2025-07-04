@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serveur GCP - {{ nom_utilisateur }}</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #4285f4 0%, #34a853 100%);
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 600px;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        .gcp-badge {
+            background: #4285f4;
+            color: white;
+            padding: 5px 15px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-bottom: 20px;
+        }
+        .info {
+            margin: 20px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="gcp-badge">GCP Instance</div>
+        <h1>Bienvenue {{ nom_utilisateur }} !</h1>
+        <div class="info">
+            <p><strong>Serveur:</strong> Google Cloud Platform</p>
+            <p><strong>Instance:</strong> {{ inventory_hostname }}</p>
+            <p><strong>Zone:</strong> {{ ansible_gce_zone | default('N/A') }}</p>
+            <p><strong>Serveur Web:</strong> Nginx</p>
+            <p><strong>Date de déploiement:</strong> {{ ansible_date_time.iso8601 }}</p>
+        </div>
+        <p>Cette page a été générée automatiquement par Omar SENE avec Terraform et configurée avec Ansible.</p>
+    </div>
+</body>
+</html>

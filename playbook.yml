@@ -1,0 +1,88 @@
+---
+- name: Configuration des serveurs web AWS et GCP avec Nginx
+  hosts: webservers
+  become: true
+  vars:
+    # Changez cette variable avec votre nom
+    nom_utilisateur: "omar-sene"
+    
+  tasks:
+    # Tâches spécifiques à AWS (Amazon Linux)
+    - name: Installer Nginx sur AWS
+      when: inventory_hostname in groups['aws_servers']
+      yum:
+        name: nginx
+        state: present
+
+    - name: Démarrer Nginx sur AWS
+      when: inventory_hostname in groups['aws_servers']
+      systemd:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Créer la page d'accueil personnalisée pour AWS
+      when: inventory_hostname in groups['aws_servers']
+      template:
+        src: index_aws.html.j2
+        dest: /usr/share/nginx/html/index.html
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart nginx
+
+    # Tâches spécifiques à GCP (Debian)
+    - name: Mettre à jour le cache des paquets sur GCP
+      when: inventory_hostname in groups['gcp_servers']
+      apt:
+        update_cache: true
+
+    - name: S'assurer que Nginx est installé sur GCP
+      when: inventory_hostname in groups['gcp_servers']
+      apt:
+        name: nginx
+        state: present
+
+    - name: Démarrer Nginx sur GCP
+      when: inventory_hostname in groups['gcp_servers']
+      systemd:
+        name: nginx
+        state: started
+        enabled: true
+
+    - name: Créer la page d'accueil personnalisée pour GCP
+      when: inventory_hostname in groups['gcp_servers']
+      template:
+        src: index_gcp.html.j2
+        dest: /var/www/html/index.html
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart nginx
+
+    # Tâches communes
+    - name: Installer des outils utiles
+      package:
+        name:
+          - curl
+          - htop
+          - git
+        state: present
+
+    - name: Créer un utilisateur système
+      user:
+        name: webadmin
+        shell: /bin/bash
+        create_home: true
+        groups: wheel,sudo
+        state: present
+
+    - name: Configurer la timezone
+      timezone:
+        name: Europe/Paris
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
