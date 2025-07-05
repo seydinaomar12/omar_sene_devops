@@ -1,0 +1,255 @@
+---
+- name: Configuration des agents de monitoring sur les serveurs web
+  hosts: webservers
+  become: true
+  vars:
+    node_exporter_version: "1.7.0"
+    apache_exporter_version: "1.0.0"
+  
+  tasks:
+    - name: Créer l'utilisateur prometheus
+      user:
+        name: prometheus
+        system: yes
+        shell: /sbin/nologin
+        home: /var/lib/prometheus
+        createhome: no
+
+    - name: Télécharger Node Exporter
+      get_url:
+        url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+        dest: /tmp/node_exporter.tar.gz
+        mode: '0644'
+
+    - name: Extraire Node Exporter
+      unarchive:
+        src: /tmp/node_exporter.tar.gz
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Copier le binaire Node Exporter
+      copy:
+        src: "/tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter"
+        dest: /usr/local/bin/node_exporter
+        mode: '0755'
+        owner: prometheus
+        group: prometheus
+        remote_src: yes
+
+    - name: Créer le service systemd pour Node Exporter
+      copy:
+        content: |
+          [Unit]
+          Description=Node Exporter
+          After=network.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/node_exporter --web.listen-address=:9100
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/node_exporter.service
+        mode: '0644'
+
+    - name: Démarrer et activer Node Exporter
+      systemd:
+        name: node_exporter
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    # Configuration pour Nginx (remplace Apache)
+    - name: Activer le module status de Nginx
+      when: inventory_hostname in groups['aws_servers'] or inventory_hostname in groups['gcp_servers']
+      blockinfile:
+        path: /etc/nginx/nginx.conf
+        block: |
+          server {
+              listen 8080;
+              location /nginx_status {
+                  stub_status on;
+                  access_log off;
+                  allow 10.0.0.0/16;
+                  allow 10.1.0.0/24;
+                  allow 127.0.0.1;
+                  deny all;
+              }
+          }
+        insertafter: "http {"
+      notify: restart nginx
+
+    - name: Télécharger Nginx Prometheus Exporter
+      get_url:
+        url: "https://github.com/nginxinc/nginx-prometheus-exporter/releases/download/v0.11.0/nginx-prometheus-exporter_0.11.0_linux_amd64.tar.gz"
+        dest: /tmp/nginx_exporter.tar.gz
+        mode: '0644'
+
+    - name: Extraire Nginx Exporter
+      unarchive:
+        src: /tmp/nginx_exporter.tar.gz
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Copier le binaire Nginx Exporter
+      copy:
+        src: "/tmp/nginx-prometheus-exporter"
+        dest: /usr/local/bin/nginx_exporter
+        mode: '0755'
+        owner: prometheus
+        group: prometheus
+        remote_src: yes
+
+    - name: Créer le service systemd pour Nginx Exporter
+      copy:
+        content: |
+          [Unit]
+          Description=Nginx Prometheus Exporter
+          After=network.target
+
+          [Service]
+          User=prometheus
+          Group=prometheus
+          Type=simple
+          ExecStart=/usr/local/bin/nginx_exporter -nginx.scrape-uri=http://localhost:8080/nginx_status
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/nginx_exporter.service
+        mode: '0644'
+
+    - name: Démarrer et activer Nginx Exporter
+      systemd:
+        name: nginx_exporter
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+- name: Configuration du serveur de monitoring
+  hosts: monitoring_servers
+  become: true
+  
+  tasks:
+    - name: Installer Docker
+      yum:
+        name: docker
+        state: present
+
+    - name: Démarrer Docker
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Ajouter l'utilisateur ec2-user au groupe docker
+      user:
+        name: ec2-user
+        groups: docker
+        append: yes
+
+    - name: Installer Docker Compose
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/v2.24.1/docker-compose-linux-x86_64"
+        dest: /usr/local/bin/docker-compose
+        mode: '0755'
+
+    - name: Créer les répertoires de monitoring
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+      loop:
+        - /opt/monitoring
+        - /opt/monitoring/prometheus
+        - /opt/monitoring/grafana
+
+    - name: Créer la configuration Prometheus
+      copy:
+        content: |
+          global:
+            scrape_interval: 15s
+
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+            
+            - job_name: 'node-exporter-aws'
+              static_configs:
+                - targets: ['{{ hostvars[groups["aws_servers"][0]]["ansible_host"] }}:9100']
+            
+            - job_name: 'node-exporter-gcp'
+              static_configs:
+                - targets: ['{{ hostvars[groups["gcp_servers"][0]]["ansible_host"] }}:9100']
+            
+            - job_name: 'nginx-aws'
+              static_configs:
+                - targets: ['{{ hostvars[groups["aws_servers"][0]]["ansible_host"] }}:9113']
+            
+            - job_name: 'nginx-gcp'
+              static_configs:
+                - targets: ['{{ hostvars[groups["gcp_servers"][0]]["ansible_host"] }}:9113']
+        dest: /opt/monitoring/prometheus/prometheus.yml
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+
+    - name: Créer Docker Compose pour monitoring
+      copy:
+        content: |
+          version: '3.8'
+          services:
+            prometheus:
+              image: prom/prometheus:latest
+              container_name: prometheus
+              ports:
+                - "9090:9090"
+              volumes:
+                - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+                - prometheus_data:/prometheus
+              command:
+                - '--config.file=/etc/prometheus/prometheus.yml'
+                - '--storage.tsdb.path=/prometheus'
+                - '--web.console.libraries=/etc/prometheus/console_libraries'
+                - '--web.console.templates=/etc/prometheus/consoles'
+                - '--storage.tsdb.retention.time=200h'
+                - '--web.enable-lifecycle'
+              restart: unless-stopped
+
+            grafana:
+              image: grafana/grafana:latest
+              container_name: grafana
+              ports:
+                - "3000:3000"
+              environment:
+                - GF_SECURITY_ADMIN_PASSWORD=admin123
+                - GF_USERS_ALLOW_SIGN_UP=false
+              volumes:
+                - grafana_data:/var/lib/grafana
+              restart: unless-stopped
+
+          volumes:
+            prometheus_data:
+            grafana_data:
+        dest: /opt/monitoring/docker-compose.yml
+        owner: ec2-user
+        group: ec2-user
+        mode: '0644'
+
+    - name: Démarrer les services de monitoring
+      shell: |
+        cd /opt/monitoring
+        /usr/local/bin/docker-compose up -d
+      become_user: ec2-user

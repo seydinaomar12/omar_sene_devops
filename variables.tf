@@ -38,3 +38,13 @@ variable "run_ansible" {
   type        = bool
   default     = true
 }
+variable "enable_monitoring" {
+  description = "Activer le monitoring avec Prometheus et Grafana"
+  type        = bool
+  default     = true
+}
+variable "monitoring_ip" {
+  description = "IP du serveur de monitoring"
+  type        = string
+  default     = "3.239.15.139"  # ou une IP par défaut
+}

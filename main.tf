@@ -243,6 +243,7 @@ resource "local_file" "ansible_inventory" {
     aws_ip = aws_instance.web.public_ip
     gcp_ip = google_compute_instance.web.network_interface.0.access_config.0.nat_ip
     ssh_key_path = pathexpand("~/.ssh/id_rsa")
+    monitoring_ip = var.monitoring_ip
   })
   
   filename = "${path.module}/inventory.ini"
@@ -268,4 +269,186 @@ resource "null_resource" "ansible_provisioner" {
 output "ansible_inventory_path" {
   description = "Chemin vers le fichier d'inventaire Ansible"
   value       = local_file.ansible_inventory.filename
+}
+
+# ========================================
+# MONITORING INFRASTRUCTURE - À AJOUTER À LA FIN DE VOTRE main.tf
+# ========================================
+
+# Instance de monitoring AWS (Prometheus + Grafana)
+resource "aws_instance" "monitoring" {
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = "t3.small"  # Plus de ressources pour le monitoring
+  key_name               = aws_key_pair.main.key_name
+  vpc_security_group_ids = [aws_security_group.monitoring.id]
+  subnet_id              = aws_subnet.public.id
+
+  user_data = <<-EOF
+    #!/bin/bash
+    yum update -y
+    yum install -y docker
+    systemctl start docker
+    systemctl enable docker
+    usermod -a -G docker ec2-user
+    
+    # Installation de Docker Compose
+    curl -L "https://github.com/docker/compose/releases/download/v2.24.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+    chmod +x /usr/local/bin/docker-compose
+    
+    # Création des répertoires
+    mkdir -p /opt/monitoring/{prometheus,grafana}
+    
+    # Configuration Prometheus
+    cat > /opt/monitoring/prometheus/prometheus.yml << 'EOL'
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+  
+  - job_name: 'node-exporter-aws'
+    static_configs:
+      - targets: ['${aws_instance.web.private_ip}:9100']
+  
+  - job_name: 'node-exporter-gcp'
+    static_configs:
+      - targets: ['${google_compute_instance.web.network_interface.0.network_ip}:9100']
+  
+  - job_name: 'apache-aws'
+    static_configs:
+      - targets: ['${aws_instance.web.private_ip}:9117']
+  
+  - job_name: 'apache-gcp'
+    static_configs:
+      - targets: ['${google_compute_instance.web.network_interface.0.network_ip}:9117']
+EOL
+
+    # Docker Compose pour monitoring
+    cat > /opt/monitoring/docker-compose.yml << 'EOL'
+version: '3.8'
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin123
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:
+EOL
+
+    # Démarrage des services
+    cd /opt/monitoring
+    docker-compose up -d
+  EOF
+
+  tags = {
+    Name = "${var.instance_name_prefix}-monitoring"
+  }
+}
+
+# Security Group pour le monitoring
+resource "aws_security_group" "monitoring" {
+  name        = "${var.instance_name_prefix}-monitoring-sg"
+  description = "Security group for monitoring server"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 3000
+    to_port     = 3000
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 9090
+    to_port     = 9090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "${var.instance_name_prefix}-monitoring-sg"
+  }
+}
+
+# Mise à jour du Security Group web pour autoriser les métriques
+resource "aws_security_group_rule" "web_monitoring" {
+  type              = "ingress"
+  from_port         = 9100
+  to_port           = 9117
+  protocol          = "tcp"
+  cidr_blocks       = ["10.0.0.0/16"]
+  security_group_id = aws_security_group.web.id
+}
+
+# Mise à jour des firewall rules GCP pour le monitoring
+resource "google_compute_firewall" "monitoring" {
+  name    = "${var.instance_name_prefix}-allow-monitoring"
+  network = google_compute_network.main.name
+
+  allow {
+    protocol = "tcp"
+    ports    = ["9100", "9117"]
+  }
+
+  source_ranges = ["10.1.0.0/24"]
+  target_tags   = ["web"]
+}
+
+# Outputs pour le monitoring
+output "monitoring_grafana_url" {
+  description = "URL d'accès à Grafana"
+  value       = "http://${aws_instance.monitoring.public_ip}:3000"
+}
+
+output "monitoring_prometheus_url" {
+  description = "URL d'accès à Prometheus"
+  value       = "http://${aws_instance.monitoring.public_ip}:9090"
+}
+
+output "monitoring_instance_ip" {
+  description = "IP publique de l'instance de monitoring"
+  value       = aws_instance.monitoring.public_ip
 }
